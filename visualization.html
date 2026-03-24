@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PLANET DEFENSE</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #020817; overflow: hidden; font-family: 'Courier New', monospace; cursor: none; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = canvas.width = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+
+const C = {
+  cyan:   '#00ffc8',
+  blue:   '#00b4ff',
+  purple: '#a855f7',
+  pink:   '#ff007a',
+  yellow: '#ffcc00',
+  white:  '#ffffff',
+};
+
+const PHRASES = [
+  'CODY CORNETT', 'AI', 'MACHINE LEARNING', 'DEEP LEARNING',
+  'LLM', 'NEURAL NET', 'GPT', 'TRANSFORMER', 'DIFFUSION',
+  'BACKPROP', 'GRADIENT', 'TENSOR', 'EMBEDDING', 'ATTENTION',
+  '∇ LOSS', '{ MODEL }', '⬡ INFERENCE', 'WEIGHTS', 'EPOCH',
+  'CUDA', 'SOFTMAX', 'RELU', 'DROPOUT', 'OVERFITTING',
+  'CODY CORNETT', 'AI',  // weighted heavier
+];
+const ECOLORS = [C.cyan, C.blue, C.purple, C.pink, C.yellow];
+
+// ── State ──────────────────────────────────────────────────────────────────────
+let t = 0;
+let mouse = { x: W / 2, y: H / 2 };
+
+const STATE = { MENU: 0, PLAYING: 1, GAMEOVER: 2 };
+let state = STATE.MENU;
+let startTime = 0;
+let highScore = 0;
+let difficulty = 1;
+let enemies = [];
+let sparks  = [];
+let spawnTimer = 0;
+let spawnInterval = 180;
+
+// Random effects
+const fx = {
+  gridOn: false,
+  staticIntensity: 0,
+  staticTarget: 0,
+  pulseOn: true,
+  particleStorm: false,
+  nextAt: 0,
+};
+
+// ── Particles ──────────────────────────────────────────────────────────────────
+class Particle {
+  constructor(init) {
+    this.x = Math.random() * W;
+    this.y = init ? Math.random() * H : -10;
+    this.r = Math.random() * 1.5 + 0.3;
+    this.vx = (Math.random() - 0.5) * 0.3;
+    this.vy = Math.random() * 0.4 + 0.1;
+    this.alpha = Math.random() * 0.6 + 0.2;
+    this.color = [C.cyan, C.blue, C.purple][Math.random() * 3 | 0];
+  }
+  update() {
+    if (fx.particleStorm) { this.vx += (Math.random() - 0.5) * 0.4; this.vy += (Math.random() - 0.5) * 0.4; }
+    const dx = mouse.x - this.x, dy = mouse.y - this.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < 100) { this.vx -= (dx / d) * 0.06; this.vy -= (dy / d) * 0.06; }
+    this.vx *= 0.98; this.vy = this.vy * 0.98 + 0.02;
+    this.x += this.vx; this.y += this.vy;
+    if (this.y > H + 10 || this.x < -50 || this.x > W + 50) { this.x = Math.random() * W; this.y = -10; this.vx = (Math.random() - 0.5) * 0.3; this.vy = Math.random() * 0.4 + 0.1; }
+  }
+  draw() {
+    ctx.beginPath(); ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fillStyle = this.color; ctx.globalAlpha = this.alpha; ctx.fill(); ctx.globalAlpha = 1;
+  }
+}
+const particles = Array.from({ length: 160 }, (_, i) => new Particle(i < 160));
+
+// ── Ambient nodes ─────────────────────────────────────────────────────────────
+class Node {
+  constructor() {
+    this.ox = this.x = Math.random() * W;
+    this.oy = this.y = Math.random() * H;
+    this.r = Math.random() * 2 + 1;
+    this.color = [C.blue, C.purple, C.cyan][Math.random() * 3 | 0];
+    this.ph = Math.random() * Math.PI * 2;
+  }
+  update() {
+    this.x = this.ox + Math.sin(t * 0.3 + this.ph) * 18;
+    this.y = this.oy + Math.cos(t * 0.25 + this.ph) * 12;
+    if (this.ox < 0 || this.ox > W) this.ox = Math.random() * W;
+    if (this.oy < 0 || this.oy > H) this.oy = Math.random() * H;
+  }
+  draw() {
+    ctx.beginPath(); ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fillStyle = this.color; ctx.globalAlpha = 0.35; ctx.fill(); ctx.globalAlpha = 1;
+  }
+}
+const nodes = Array.from({ length: 35 }, () => new Node());
+
+function drawEdges() {
+  const LINK = 110;
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < LINK) {
+        ctx.beginPath(); ctx.moveTo(nodes[i].x, nodes[i].y); ctx.lineTo(nodes[j].x, nodes[j].y);
+        ctx.strokeStyle = nodes[i].color; ctx.lineWidth = 0.5;
+        ctx.globalAlpha = (1 - d / LINK) * 0.2; ctx.stroke(); ctx.globalAlpha = 1;
+      }
+    }
+  }
+}
+
+// ── Orbit rings ────────────────────────────────────────────────────────────────
+class DataRing {
+  constructor(radius, count, color, speed) {
+    this.radius = radius; this.color = color;
+    this.speed = speed; this.baseSpeed = speed;
+    this.offset = Math.random() * Math.PI * 2;
+    this.alpha = 1; this.targetAlpha = 1;
+    this.dots = Array.from({ length: count }, (_, i) => ({
+      angle: (i / count) * Math.PI * 2,
+      r: Math.random() * 2 + 1.5,
+      lit: Math.random() > 0.5,
+    }));
+  }
+  update() {
+    this.offset += this.speed;
+    this.alpha += (this.targetAlpha - this.alpha) * 0.04;
+  }
+  draw() {
+    if (this.alpha < 0.01) return;
+    const cx = W / 2, cy = H / 2;
+    ctx.beginPath(); ctx.arc(cx, cy, this.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = this.color; ctx.lineWidth = 0.5; ctx.globalAlpha = 0.12 * this.alpha; ctx.stroke();
+    for (const d of this.dots) {
+      const a = d.angle + this.offset;
+      const x = cx + Math.cos(a) * this.radius;
+      const y = cy + Math.sin(a) * this.radius;
+      ctx.beginPath(); ctx.arc(x, y, d.r, 0, Math.PI * 2);
+      ctx.fillStyle = this.color; ctx.globalAlpha = (d.lit ? 0.8 : 0.2) * this.alpha; ctx.fill();
+      if (d.lit) { ctx.shadowColor = this.color; ctx.shadowBlur = 6; ctx.fill(); ctx.shadowBlur = 0; }
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+const rings = [
+  new DataRing(140, 16, C.cyan,   0.003),
+  new DataRing(200, 24, C.purple, -0.002),
+  new DataRing(265, 32, C.blue,   0.0015),
+  new DataRing(320, 20, C.pink,  -0.004),
+];
+
+// ── Planet ─────────────────────────────────────────────────────────────────────
+const PLANET_R = 52;
+const planet = { x: W / 2, y: H / 2, r: PLANET_R, hitFlash: 0, ringAngle: 0 };
+
+function drawPlanet() {
+  const { x, y, r } = planet;
+  planet.ringAngle += 0.009;
+
+  // Outer atmosphere pulse
+  const atmR = r + 28 + Math.sin(t * 1.8) * 5;
+  const atm = ctx.createRadialGradient(x, y, r * 0.7, x, y, atmR);
+  atm.addColorStop(0, 'rgba(0,180,255,0.18)');
+  atm.addColorStop(1, 'transparent');
+  ctx.beginPath(); ctx.arc(x, y, atmR, 0, Math.PI * 2); ctx.fillStyle = atm; ctx.fill();
+
+  // Tilted orbital bands
+  for (let i = 0; i < 3; i++) {
+    const or = r + 16 + i * 13;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(planet.ringAngle * (i % 2 === 0 ? 1 : -1.4) + i);
+    ctx.scale(1, 0.3 + i * 0.08);
+    ctx.beginPath(); ctx.arc(0, 0, or, 0, Math.PI * 2);
+    ctx.strokeStyle = [C.cyan, C.blue, C.purple][i];
+    ctx.lineWidth = i === 1 ? 1.5 : 0.8;
+    ctx.globalAlpha = 0.45 - i * 0.1; ctx.stroke();
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+
+  // Surface
+  const surf = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.05, x, y, r);
+  if (planet.hitFlash > 0) {
+    surf.addColorStop(0, '#ffffff');
+    surf.addColorStop(0.3, C.pink);
+    surf.addColorStop(1, '#2a0010');
+    planet.hitFlash = Math.max(0, planet.hitFlash - 0.04);
+  } else {
+    surf.addColorStop(0, '#1a4a8a');
+    surf.addColorStop(0.5, '#0a2855');
+    surf.addColorStop(1, '#020817');
+  }
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = surf; ctx.fill();
+
+  // Highlight
+  const hl = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, 0, x, y, r);
+  hl.addColorStop(0, 'rgba(255,255,255,0.2)'); hl.addColorStop(0.5, 'transparent');
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = hl; ctx.fill();
+
+  // Glow ring
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = C.blue; ctx.lineWidth = 1.5;
+  ctx.shadowColor = C.blue; ctx.shadowBlur = 22;
+  ctx.globalAlpha = 0.85; ctx.stroke();
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+}
+
+// ── Repulsor cursor ────────────────────────────────────────────────────────────
+const REPULSOR_R = 140;
+
+function drawRepulsor() {
+  if (state !== STATE.PLAYING) return;
+  const { x, y } = mouse;
+  const pulse = 0.25 + Math.sin(t * 5) * 0.08;
+
+  const grad = ctx.createRadialGradient(x, y, 8, x, y, REPULSOR_R);
+  grad.addColorStop(0, 'rgba(0,255,200,0.07)');
+  grad.addColorStop(1, 'transparent');
+  ctx.beginPath(); ctx.arc(x, y, REPULSOR_R, 0, Math.PI * 2); ctx.fillStyle = grad; ctx.fill();
+
+  ctx.beginPath(); ctx.arc(x, y, REPULSOR_R, 0, Math.PI * 2);
+  ctx.strokeStyle = C.cyan; ctx.lineWidth = 0.8; ctx.globalAlpha = pulse; ctx.stroke();
+
+  // Inner dot crosshair
+  ctx.strokeStyle = C.cyan; ctx.lineWidth = 1; ctx.globalAlpha = 0.75;
+  const cs = 7;
+  ctx.beginPath(); ctx.moveTo(x - cs, y); ctx.lineTo(x + cs, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y - cs); ctx.lineTo(x, y + cs); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// ── Enemies ────────────────────────────────────────────────────────────────────
+class Enemy {
+  constructor() {
+    const edge = Math.random() * 4 | 0;
+    const m = 130;
+    if (edge === 0)      { this.x = -m;     this.y = Math.random() * H; }
+    else if (edge === 1) { this.x = W + m;  this.y = Math.random() * H; }
+    else if (edge === 2) { this.x = Math.random() * W; this.y = -m; }
+    else                 { this.x = Math.random() * W; this.y = H + m; }
+
+    this.text      = PHRASES[Math.random() * PHRASES.length | 0];
+    this.fontSize  = Math.random() * 20 + 13;
+    this.color     = ECOLORS[Math.random() * ECOLORS.length | 0];
+    this.baseSpeed = Math.random() * 0.55 + 0.35;
+    this.vx = 0; this.vy = 0;
+    this.erratic = 0; this.erraticTimer = 0;
+    this.erraticPhase = Math.random() * Math.PI * 2;
+    this.wobbleAmp = Math.random() * 2 + 0.5;
+    this.alpha = 0;
+    this.glitch = 0;
+  }
+
+  get speed() { return this.baseSpeed * difficulty; }
+  get radius() { return this.text.length * this.fontSize * 0.28; }
+
+  update() {
+    this.alpha = Math.min(1, this.alpha + 0.022);
+
+    const dx = planet.x - this.x, dy = planet.y - this.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    // Erratic direction-change timer
+    this.erraticTimer--;
+    if (this.erraticTimer <= 0) {
+      this.erratic = (Math.random() - 0.5) * 4;
+      this.erraticTimer = Math.random() * 45 + 10;
+    }
+
+    // Sinewave wobble perpendicular to heading
+    const perp = Math.sin(t * 1.4 + this.erraticPhase) * this.wobbleAmp + this.erratic;
+
+    // Acceleration toward planet
+    const spd = this.speed;
+    this.vx += (dx / d) * spd * 0.08;
+    this.vy += (dy / d) * spd * 0.08;
+
+    // Perpendicular erratic force
+    this.vx += (-dy / d) * perp * 0.18;
+    this.vy += ( dx / d) * perp * 0.18;
+
+    // Mouse repulsion
+    const mdx = this.x - mouse.x, mdy = this.y - mouse.y;
+    const md = Math.sqrt(mdx * mdx + mdy * mdy) || 1;
+    if (md < REPULSOR_R) {
+      const f = (1 - md / REPULSOR_R) * 6;
+      this.vx += (mdx / md) * f;
+      this.vy += (mdy / md) * f;
+    }
+
+    this.vx *= 0.89; this.vy *= 0.89;
+    this.x += this.vx; this.y += this.vy;
+
+    if (this.glitch > 0) this.glitch -= 0.06;
+
+    // Collision
+    if (d < planet.r + this.fontSize * 0.45) return 'hit';
+  }
+
+  draw() {
+    ctx.save();
+    ctx.globalAlpha = this.alpha;
+    ctx.font = `bold ${this.fontSize}px 'Courier New', monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    let ox = 0, oy = 0;
+    if (this.glitch > 0.15) {
+      ox = (Math.random() - 0.5) * 10 * this.glitch;
+      oy = (Math.random() - 0.5) * 4  * this.glitch;
+      ctx.fillStyle = 'rgba(255,0,100,0.45)';
+      ctx.fillText(this.text, this.x + ox - 3, this.y + oy);
+      ctx.fillStyle = 'rgba(0,200,255,0.45)';
+      ctx.fillText(this.text, this.x + ox + 3, this.y + oy);
+    }
+
+    ctx.shadowColor = this.color; ctx.shadowBlur = 18;
+    ctx.fillStyle = this.color;
+    ctx.fillText(this.text, this.x + ox, this.y + oy);
+    ctx.restore(); ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  }
+}
+
+// ── Explosion sparks ────────────────────────────────────────────────────────────
+class Spark {
+  constructor(x, y, color) {
+    this.x = x; this.y = y;
+    const a = Math.random() * Math.PI * 2;
+    const s = Math.random() * 10 + 2;
+    this.vx = Math.cos(a) * s; this.vy = Math.sin(a) * s;
+    this.r = Math.random() * 4 + 1;
+    this.color = color; this.life = 1;
+  }
+  update() {
+    this.x += this.vx; this.y += this.vy;
+    this.vx *= 0.93; this.vy = this.vy * 0.93 + 0.2;
+    this.life -= 0.022;
+    return this.life > 0;
+  }
+  draw() {
+    ctx.beginPath(); ctx.arc(this.x, this.y, this.r * this.life, 0, Math.PI * 2);
+    ctx.fillStyle = this.color; ctx.globalAlpha = this.life; ctx.fill(); ctx.globalAlpha = 1;
+  }
+}
+
+function explodePlanet() {
+  const cols = [C.pink, C.yellow, C.cyan, C.white, C.purple];
+  for (let i = 0; i < 100; i++) sparks.push(new Spark(planet.x, planet.y, cols[Math.random() * cols.length | 0]));
+}
+
+// ── Digital static ──────────────────────────────────────────────────────────────
+const sCanvas = document.createElement('canvas');
+sCanvas.width = 320; sCanvas.height = 180;
+const sCtx = sCanvas.getContext('2d');
+
+function buildStaticFrame() {
+  const img = sCtx.createImageData(320, 180);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const v = Math.random();
+    if (v > 0.85) {
+      d[i] = 0; d[i+1] = Math.random()*255|0; d[i+2] = Math.random()*200+55|0; d[i+3] = Math.random()*200+55|0;
+    } else if (v > 0.7) {
+      const g = Math.random()*120|0; d[i]=d[i+1]=d[i+2]=g; d[i+3]=g;
+    } else { d[i+3] = 0; }
+  }
+  sCtx.putImageData(img, 0, 0);
+  for (let b = 0, n = Math.random()*7|0; b < n; b++) {
+    sCtx.fillStyle = `rgba(0,255,200,${Math.random()*0.25})`;
+    sCtx.fillRect(0, Math.random()*180, 320, Math.random()*4+1);
+  }
+}
+
+function drawStatic(intensity) {
+  if (intensity < 0.01) return;
+  buildStaticFrame();
+  ctx.save();
+  ctx.globalAlpha = intensity * 0.55;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(sCanvas, 0, 0, W, H);
+  if (Math.random() > 0.92) {
+    ctx.globalAlpha = intensity * 0.3; ctx.fillStyle = '#00ffc8';
+    ctx.fillRect(0, Math.random()*H, W, Math.random()*6+1);
+  }
+  ctx.restore();
+}
+
+// ── Scan line ──────────────────────────────────────────────────────────────────
+let scanY = 0;
+function drawScanLine() {
+  scanY = (scanY + 1) % H;
+  const g = ctx.createLinearGradient(0, scanY - 30, 0, scanY + 30);
+  g.addColorStop(0, 'transparent'); g.addColorStop(0.5, 'rgba(0,255,200,0.04)'); g.addColorStop(1, 'transparent');
+  ctx.fillStyle = g; ctx.fillRect(0, scanY - 30, W, 60);
+}
+
+// ── Grid ───────────────────────────────────────────────────────────────────────
+function drawGrid() {
+  ctx.strokeStyle = 'rgba(0,180,255,0.07)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 60) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+}
+
+// ── Pulse ──────────────────────────────────────────────────────────────────────
+let pulseR = 0, pulseAlpha = 0;
+function drawPulse() {
+  if (!fx.pulseOn) return;
+  pulseR += 3; pulseAlpha -= 0.01;
+  if (pulseAlpha <= 0) { pulseR = 0; pulseAlpha = 0.55; }
+  ctx.beginPath(); ctx.arc(W/2, H/2, pulseR, 0, Math.PI*2);
+  ctx.strokeStyle = C.cyan; ctx.lineWidth = 2; ctx.globalAlpha = pulseAlpha; ctx.stroke(); ctx.globalAlpha = 1;
+}
+
+// ── Random effects manager ─────────────────────────────────────────────────────
+function tickEffects() {
+  if (t > fx.nextAt) {
+    const roll = Math.random();
+    if      (roll < 0.18) fx.gridOn = !fx.gridOn;
+    else if (roll < 0.36) fx.staticTarget = fx.staticTarget > 0 ? 0 : Math.random() * 0.55 + 0.15;
+    else if (roll < 0.52) fx.pulseOn = !fx.pulseOn;
+    else if (roll < 0.64) fx.particleStorm = !fx.particleStorm;
+    else if (roll < 0.80) {
+      rings.forEach(r => { r.speed = r.baseSpeed * (Math.random() * 3.5 + 0.2) * (Math.random() > 0.5 ? 1 : -1); });
+    } else {
+      const ring = rings[Math.random() * rings.length | 0];
+      ring.targetAlpha = ring.targetAlpha > 0.5 ? 0 : 1;
+    }
+    fx.nextAt = t + Math.random() * 7 + 3;
+  }
+  fx.staticIntensity += (fx.staticTarget - fx.staticIntensity) * 0.05;
+}
+
+// ── HUD ────────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  if (state !== STATE.PLAYING) return;
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  ctx.font = 'bold 24px Courier New'; ctx.textAlign = 'right';
+  ctx.fillStyle = C.cyan; ctx.shadowColor = C.cyan; ctx.shadowBlur = 12;
+  ctx.fillText(`${elapsed}s`, W - 20, 38);
+  ctx.font = '13px Courier New'; ctx.fillStyle = 'rgba(0,255,200,0.5)'; ctx.shadowBlur = 0;
+  ctx.fillText(`BEST ${highScore.toFixed(1)}s`, W - 20, 58);
+
+  ctx.textAlign = 'left'; ctx.font = '12px Courier New';
+  ctx.fillStyle = 'rgba(0,180,255,0.45)';
+  ctx.fillText(`LVL ${(difficulty).toFixed(2)}`, 16, 36);
+  ctx.fillText(`THREATS: ${enemies.length}`, 16, 54);
+  ctx.textAlign = 'left';
+}
+
+// ── Screens ────────────────────────────────────────────────────────────────────
+function drawMenu() {
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 58px Courier New';
+  ctx.fillStyle = C.cyan; ctx.shadowColor = C.cyan; ctx.shadowBlur = 35;
+  ctx.fillText('PLANET', W/2, H/2 - 90);
+  ctx.fillStyle = C.purple; ctx.shadowColor = C.purple;
+  ctx.fillText('DEFENSE', W/2, H/2 - 22);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '14px Courier New'; ctx.fillStyle = 'rgba(0,255,200,0.7)';
+  ctx.fillText('MOVE YOUR CURSOR TO REPEL INCOMING THREATS', W/2, H/2 + 40);
+  ctx.fillText('IF THEY REACH THE PLANET — IT\'S OVER', W/2, H/2 + 62);
+
+  const blink = 0.55 + Math.sin(t * 3) * 0.45;
+  ctx.fillStyle = C.cyan; ctx.shadowColor = C.cyan; ctx.shadowBlur = 14 * blink;
+  ctx.font = 'bold 20px Courier New';
+  ctx.fillText('[ CLICK TO START ]', W/2, H/2 + 116);
+  ctx.shadowBlur = 0;
+
+  if (highScore > 0) {
+    ctx.font = '12px Courier New'; ctx.fillStyle = 'rgba(168,85,247,0.75)';
+    ctx.fillText(`BEST: ${highScore.toFixed(1)}s`, W/2, H/2 + 148);
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver() {
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  ctx.textAlign = 'center';
+
+  // Red scan overlay
+  ctx.fillStyle = 'rgba(255,0,80,0.06)'; ctx.fillRect(0, 0, W, H);
+
+  ctx.font = 'bold 68px Courier New';
+  ctx.fillStyle = C.pink; ctx.shadowColor = C.pink; ctx.shadowBlur = 50;
+  ctx.fillText('GAME OVER', W/2, H/2 - 70);
+
+  ctx.shadowBlur = 12; ctx.font = 'bold 30px Courier New';
+  ctx.fillStyle = C.white;
+  ctx.fillText(`SURVIVED: ${elapsed}s`, W/2, H/2 + 4);
+
+  if (parseFloat(elapsed) >= highScore) {
+    ctx.font = '17px Courier New'; ctx.fillStyle = C.yellow;
+    ctx.shadowColor = C.yellow; ctx.shadowBlur = 14;
+    ctx.fillText('★  NEW HIGH SCORE  ★', W/2, H/2 + 42);
+  }
+
+  const blink = 0.55 + Math.sin(t * 3) * 0.45;
+  ctx.fillStyle = C.cyan; ctx.shadowColor = C.cyan; ctx.shadowBlur = 14 * blink;
+  ctx.font = 'bold 18px Courier New';
+  ctx.fillText('[ CLICK TO RESTART ]', W/2, H/2 + 96);
+  ctx.shadowBlur = 0; ctx.textAlign = 'left';
+}
+
+// ── Game control ───────────────────────────────────────────────────────────────
+function startGame() {
+  state = STATE.PLAYING;
+  enemies = []; sparks = [];
+  spawnTimer = 0; spawnInterval = 180;
+  difficulty = 1;
+  startTime = Date.now();
+  planet.hitFlash = 0;
+  fx.staticIntensity = 0; fx.staticTarget = 0;
+  fx.gridOn = false; fx.pulseOn = true; fx.particleStorm = false;
+  fx.nextAt = t + 5;
+}
+
+function endGame() {
+  const elapsed = (Date.now() - startTime) / 1000;
+  highScore = Math.max(highScore, elapsed);
+  explodePlanet();
+  planet.hitFlash = 1;
+  state = STATE.GAMEOVER;
+  fx.staticTarget = 0.9;
+  setTimeout(() => { fx.staticTarget = 0.15; }, 600);
+}
+
+// ── Main loop ──────────────────────────────────────────────────────────────────
+function frame() {
+  requestAnimationFrame(frame);
+  t += 0.016;
+
+  // Trail fade
+  ctx.fillStyle = 'rgba(2,8,23,0.48)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (fx.gridOn) drawGrid();
+  drawScanLine();
+
+  for (const p of particles) { p.update(); p.draw(); }
+  drawEdges();
+  for (const n of nodes) { n.update(); n.draw(); }
+  for (const r of rings) { r.update(); r.draw(); }
+
+  drawPlanet();
+
+  // ── Playing ──
+  if (state === STATE.PLAYING) {
+    tickEffects();
+
+    const elapsed = (Date.now() - startTime) / 1000;
+    difficulty = 1 + elapsed / 25;
+    spawnInterval = Math.max(35, 180 - elapsed * 2.8);
+
+    spawnTimer++;
+    if (spawnTimer >= spawnInterval) {
+      enemies.push(new Enemy());
+      if (difficulty > 1.8) enemies.push(new Enemy());
+      if (difficulty > 3.0) enemies.push(new Enemy());
+      spawnTimer = 0;
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const result = enemies[i].update();
+      if (result === 'hit') { endGame(); enemies.splice(i, 1); break; }
+    }
+    for (const e of enemies) e.draw();
+  }
+
+  // ── Menu ──
+  if (state === STATE.MENU) drawMenu();
+
+  // ── Game over ──
+  if (state === STATE.GAMEOVER) {
+    fx.staticIntensity += (fx.staticTarget - fx.staticIntensity) * 0.05;
+    for (const e of enemies) { e.glitch = 1; e.draw(); }
+    drawGameOver();
+  }
+
+  // Sparks
+  sparks = sparks.filter(s => { const a = s.update(); s.draw(); return a; });
+
+  drawStatic(fx.staticIntensity);
+  drawPulse();
+  drawRepulsor();
+  drawHUD();
+}
+
+// ── Events ────────────────────────────────────────────────────────────────────
+window.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+window.addEventListener('click', () => {
+  if (state === STATE.MENU || state === STATE.GAMEOVER) startGame();
+});
+window.addEventListener('resize', () => {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  planet.x = W / 2; planet.y = H / 2;
+});
+
+frame();
+</script>
+</body>
+</html>
